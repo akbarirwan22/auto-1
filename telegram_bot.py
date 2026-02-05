@@ -496,25 +496,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     if query.data == "scan_now":
+        # Don't delete entire message, just change text to indicate loading
         await query.edit_message_text("🔄 Scanning all branches...\nMohon tunggu ~15 detik...")
         
         # Perform scan
         results = await scan_all_branches()
         
+        # Determine keyboard based on mode
+        if LIVE_MONITOR_ENABLED:
+            keyboard = [
+                 [InlineKeyboardButton("🔄 Refresh Data", callback_data="scan_now")],
+                 [
+                     InlineKeyboardButton("🔴 Matikan", callback_data="toggle_live_monitor"),
+                     InlineKeyboardButton("◀️ Menu", callback_data="back_to_menu")
+                 ]
+            ]
+        else:
+             keyboard = [
+                 [InlineKeyboardButton("🔄 Refresh Data", callback_data="scan_now")],
+                 [InlineKeyboardButton("◀️ Kembali ke Menu", callback_data="back_to_menu")]
+            ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         if not results:
-            await query.edit_message_text("❌ Scan gagal! Silakan coba lagi.")
+            # If scan failed, show error but keep the menu accessible
+            await query.edit_message_text(
+                "❌ Scan gagal! Silakan coba lagi.",
+                reply_markup=reply_markup
+            )
             return
         
         # Format and send message
         scan_time = datetime.now(TZ).strftime("%H:%M:%S")
         message = format_scan_results_new(results)
         
-        # Add refresh button
-        keyboard = [
-             [InlineKeyboardButton("🔄 Refresh Data", callback_data="scan_now")],
-             [InlineKeyboardButton("◀️ Kembali ke Menu", callback_data="back_to_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        if LIVE_MONITOR_ENABLED:
+            message = "🟢 <b>LIVE MONITOR RUNNING</b>\n" + message
         
         await query.edit_message_text(
             message,
@@ -757,7 +774,7 @@ def check_for_changes(chat_id: int, new_results: List[Dict]) -> List[str]:
         # Trigger 1: Becomes available
         if new_status == "READY" and old_status != "READY":
             slots = new_data.get('aktifCount', 0)
-            alerts.append(f"🔔 <b>{branch_name}</b> BUKA! ({slots} slot)")
+            alerts.append(f"�🚨🚨 <b>{branch_name}</b> BUKA! ({slots} slot)")
             
         # Trigger 2: Slot count increased significantly (e.g. restock)
         # Only if already READY
@@ -784,8 +801,8 @@ async def live_monitor_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Perform scan
         results = await scan_all_branches()
         
-        if not results:
-            return  # Skip update if failed
+        # if not results:
+        #    return  # OLD: Skip update if failed
         
         # Check for changes
         alerts = check_for_changes(chat_id, results)
