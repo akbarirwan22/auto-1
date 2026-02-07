@@ -321,11 +321,27 @@ async def scan_all_branches() -> List[Dict]:
             loop = asyncio.get_running_loop()
             from functools import partial
             
-            # Use default executor (Thread pool)
-            results = await loop.run_in_executor(
-                None, 
-                partial(scan_all_cabang, session, CABANG_LIST)
-            )
+            # Use default executor (Thread pool) with timeout to prevent hanging
+            try:
+                results = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, 
+                        partial(scan_all_cabang, session, CABANG_LIST)
+                    ),
+                    timeout=120.0  # 2 minutes max for scan
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"⏰ Scan timed out after 120 seconds (attempt {attempt}/{max_retries})")
+                # Clear session and retry
+                if "session" in account:
+                    del account["session"]
+                
+                if attempt < max_retries:
+                    logger.info(f"🔄 Retrying with fresh login...")
+                    await asyncio.sleep(1)
+                    continue
+                
+                return []
             
             # Check if results is empty due to session expiry
             if not results:
@@ -739,6 +755,10 @@ def check_for_changes(chat_id: int, new_results: List[Dict]) -> List[str]:
     alerts = []
     global PREVIOUS_SCAN_RESULTS
     
+    # Current time
+    now = datetime.now(TZ)
+    current_time = now.time()
+    
     # Initialize previous results for this chat if not exists
     if chat_id not in PREVIOUS_SCAN_RESULTS:
         # First run, just save state, no alerts (or maybe alert if found?)
@@ -773,8 +793,48 @@ def check_for_changes(chat_id: int, new_results: List[Dict]) -> List[str]:
         
         # Trigger 1: Becomes available
         if new_status == "READY" and old_status != "READY":
+            # Filter: Check if war time has passed
+            war_label = new_data.get('mulaiLabel', '-')
+            war_time_str = None
+            
+            import re
+            m = re.search(r"(\d{2}:\d{2})", war_label)
+            if m:
+                war_time_str = m.group(1)
+                try:
+                    war_time = datetime.strptime(war_time_str, "%H:%M").time()
+                    # Skip if war time has already passed
+                    if war_time < current_time:
+                        continue  # Don't alert for expired war times
+                except:
+                    pass  # If parsing fails, still send alert
+            
             slots = new_data.get('aktifCount', 0)
-            alerts.append(f"�🚨🚨 <b>{branch_name}</b> BUKA! ({slots} slot)")
+            gramasi = new_data.get('gramasi', '-')
+            
+            # Extract highest gramasi
+            highest_gramasi = "-"
+            if gramasi and gramasi != '-':
+                # gramasi format: "0.5g, 1g, 2g, 5g, 10g, 25g, 50g, 100g"
+                try:
+                    weights = []
+                    for item in gramasi.split(','):
+                        item = item.strip().lower().replace('g', '').replace('gr', '')
+                        try:
+                            weights.append(float(item))
+                        except:
+                            pass
+                    if weights:
+                        max_weight = max(weights)
+                        # Format nicely
+                        if max_weight >= 1:
+                            highest_gramasi = f"{int(max_weight)}gr"
+                        else:
+                            highest_gramasi = f"{max_weight}gr"
+                except:
+                    highest_gramasi = gramasi
+            
+            alerts.append(f"🚨🚨🚨 <b>{branch_name}</b> BUKA! ({slots} slot | Max: {highest_gramasi})")
             
         # Trigger 2: Slot count increased significantly (e.g. restock)
         # Only if already READY
